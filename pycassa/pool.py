@@ -17,7 +17,7 @@ from connection import (Connection, default_socket_factory,
         default_transport_factory)
 from logging.pool_logger import PoolLogger
 from util import as_interface
-from cassandra.ttypes import TimedOutException, UnavailableException
+from cassandra.ttypes import TimedOutException, UnavailableException, Compression, ConsistencyLevel
 
 _BASE_BACKOFF = 0.01
 
@@ -277,6 +277,7 @@ class ConnectionPool(object):
                  prefill=True,
                  socket_factory=default_socket_factory,
                  transport_factory=default_transport_factory,
+                 auto_detect=False,
                  **kwargs):
         """
         All connections in the pool will be opened to `keyspace`.
@@ -319,6 +320,9 @@ class ConnectionPool(object):
 
         If `prefill` is set to ``True``, `pool_size` connections will be opened
         when the pool is created.
+
+        If `auto_detect` is set to ``True``, the connection pool will automatically try to
+        connect to nodes that are peers of the hosts in the server_list
 
         Example Usage:
 
@@ -376,11 +380,33 @@ class ConnectionPool(object):
             if kw in kwargs:
                 setattr(self, kw, kwargs[kw])
 
-        self.set_server_list(server_list)
+        if auto_detect:
+            self.set_server_list(self.detect_nodes(server_list))
+        else:
+            self.set_server_list(server_list)
 
         self._prefill = prefill
         if self._prefill:
             self.fill()
+
+    def detect_nodes(self, seed_list):
+        nodes = set(seed_list)
+        for seed in seed_list:
+            nodes = nodes.union(self.get_peers(seed))
+        return nodes
+
+    def get_peers(self, seed):
+        conn = self._get_new_wrapper(seed)
+        result = conn.execute_cql3_query('select * from system.peers', Compression.NONE, ConsistencyLevel.ONE)
+        try:
+            peers = [socket.inet_ntoa(col.value)
+                     for row in result.rows
+                     for col in row.columns
+                     if col.name == 'peer']
+        except Exception as e:
+            peers = []
+        self.put(conn)
+        return peers
 
     def set_server_list(self, server_list):
         """
